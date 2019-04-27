@@ -2319,32 +2319,12 @@ static void get_attr_val(SV *sth,AV *list,imp_fbh_t *fbh, text  *name , OCITypeC
                                    &ub4_str_len,
                                    str_buf,
                                    status);
-
-		if (typecode == OCI_TYPECODE_TIMESTAMP_TZ || typecode == OCI_TYPECODE_TIMESTAMP_LTZ){
-			char s_tz_hour[5];
-			char s_tz_min[4];
-			sb1 tz_hour;
-			sb1 tz_minute;
-			status = OCIDateTimeGetTimeZoneOffset (fbh->imp_sth->envhp,
-												 fbh->imp_sth->errhp,
-												 *(OCIDateTime**)attr_value,
-												 &tz_hour,
-									&tz_minute );
-
-			if (  (tz_hour<0) && (tz_hour>-10) ){
-				sprintf(s_tz_hour," %03d",tz_hour);
-			} else {
-				sprintf(s_tz_hour," %02d",tz_hour);
-			}
-
-			sprintf(s_tz_min,":%02d", tz_minute);
-			strcat((signed char*)str_buf, s_tz_hour);
-			strcat((signed char*)str_buf, s_tz_min);
-			str_buf[ub4_str_len+7] = '\0';
-
-		} else {
-		  str_buf[ub4_str_len+1] = '\0';
-		}
+		/* Originally this code added the timezone, but OCIDateTimeToText()
+		   already does that where needed.
+		   It also added the time zone to timestamp with local time zone, but
+		   that isn't required since ts with ltz is adjusted for the local/session
+		   time zone, and oracle doesn't add the TZ to that by default anyway.
+		*/
 
 		av_push(list, newSVpv( (char *) str_buf,0));
 		break;

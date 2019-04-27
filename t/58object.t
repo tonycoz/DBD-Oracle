@@ -14,6 +14,9 @@ use Test::More;
 $| = 1;
 
 $ENV{NLS_DATE_FORMAT} = 'YYYY-MM-DD"T"HH24:MI:SS';
+$ENV{NLS_TIMESTAMP_TZ_FORMAT} = 'YYYY-MM-DD"T"HH24:MI:SS TZH:TZM';
+# note that timestamp with local time zone uses this format too
+$ENV{NLS_TIMESTAMP_FORMAT} = 'YYYY-MM-DD"T"HH24:MI:SS';
 
 # create a database handle
 my $dbh = eval{ db_handle( {
@@ -25,7 +28,7 @@ my $dbh = eval{ db_handle( {
 
 plan skip_all => 'Unable to connect to Oracle' unless $dbh;
 
-plan tests => 65;
+plan tests => 75;
 
 my $dbuser = $ENV{ORACLE_USERID} || 'scott/tiger';
 my ($schema) = $dbuser =~ m{^([^/]*)};
@@ -48,6 +51,7 @@ ok(
 my $obj_prefix = 'dbd_test_' . ( $ENV{DBD_ORACLE_SEQ} || '' );
 my $super_type = "${obj_prefix}_type_A";
 my $sub_type   = "${obj_prefix}_type_B";
+my $ts_tz_type = "${obj_prefix}_type_C";
 my $table      = "${obj_prefix}_obj_table";
 my $outer_type = "${obj_prefix}_outer_type";
 my $inner_type = "${obj_prefix}_inner_type";
@@ -70,6 +74,7 @@ sub drop_test_objects {
         "TYPE $inner_type",
         "TABLE $table",
         "TYPE $sub_type",
+        "TYPE $ts_tz_type",
         "TYPE $super_type"
       )
     {
@@ -92,8 +97,13 @@ my $ora8      = $dbh->func('ora_server_version')->[0] < 9;
 my $final     = $ora8 ? '' : 'FINAL';
 my $not_final = $ora8 ? '' : 'NOT FINAL';
 
+# matters for ts with ltz
+sql_do_ok($dbh, <<SQL);
+ALTER SESSION SET TIME_ZONE = '+10:00'
+SQL
+
 SKIP: {
-    skip q{don't have permission to create type} => 61
+    skip q{don't have permission to create type} => 70
       unless grep { $_ eq 'CREATE TYPE' } @privileges;
 
     sql_do_ok(
@@ -104,11 +114,17 @@ SKIP: {
     );
 
   SKIP: {
-        skip 'Subtypes new in Oracle 9' => 1 if $ora8;
+        skip 'Subtypes new in Oracle 9' => 2 if $ora8;
         sql_do_ok(
             $dbh, qq{ CREATE OR REPLACE TYPE $sub_type UNDER $super_type (
                 datetime  DATE,
                 amount    NUMERIC(10,5)
+            ) $not_final }
+        );
+        sql_do_ok(
+            $dbh, qq{ CREATE OR REPLACE TYPE $ts_tz_type UNDER $super_type (
+                ts_tz     TIMESTAMP WITH TIME ZONE,
+                ts_ltz    TIMESTAMP WITH LOCAL TIME ZONE
             ) $not_final }
         );
     }
@@ -117,7 +133,7 @@ SKIP: {
     sql_do_ok( $dbh,
         qq{ INSERT INTO $table VALUES (1, $super_type(13, 'obj1')) } );
   SKIP: {
-        skip 'Subtypes new in Oracle 9' => 2 if $ora8;
+        skip 'Subtypes new in Oracle 9' => 3 if $ora8;
         sql_do_ok(
             $dbh, qq{ INSERT INTO $table VALUES (2, $sub_type(NULL, 'obj2',
                     TO_DATE('2004-11-30 14:27:18', 'YYYY-MM-DD HH24:MI:SS'),
@@ -127,6 +143,12 @@ SKIP: {
         sql_do_ok(
             $dbh, qq{ INSERT INTO $table VALUES (3, $sub_type(5, 'obj3', NULL,
     777.666)) }
+        );
+
+        sql_do_ok(
+            $dbh, qq{ INSERT INTO $table VALUES (4, $ts_tz_type(NULL, 'obj4',
+                    TO_TIMESTAMP_TZ('2004-11-30 14:27:18 +05:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM'),
+                    TO_TIMESTAMP('2004-11-30 14:27:18', 'YYYY-MM-DD HH24:MI:SS'))) }
         );
     }
     sql_do_ok(
@@ -177,14 +199,14 @@ qq{ INSERT INTO $list_table VALUES(81,$list_type($inner_type(null, 'listed'))) }
     ok( $sth,            'old: Prepare select' );
     ok( $sth->execute(), 'old: Execute select' );
 
-    my ( @row1, @row2, @row3 );
+    my ( @row1, @row2, @row3, @row4 );
     @row1 = $sth->fetchrow();
     ok( scalar @row1, 'old: Fetch first row' );
     cmp_ok( ref $row1[1], 'eq', 'ARRAY', 'old: Row 1 column 2 is an ARRAY' );
     cmp_ok( scalar( @{ $row1[1] } ),
         '==', 2, 'old: Row 1 column 2 has 2 elements' );
   SKIP: {
-        skip 'Subtypes new in Oracle 9' => 6 if $ora8;
+        skip 'Subtypes new in Oracle 9' => 9 if $ora8;
         @row2 = $sth->fetchrow();
         ok( scalar @row2, 'old: Fetch second row' );
         cmp_ok( ref $row2[1], 'eq', 'ARRAY',
@@ -198,6 +220,13 @@ qq{ INSERT INTO $list_table VALUES(81,$list_type($inner_type(null, 'listed'))) }
             'old: Row 3 column 2 is an ARRAY' );
         cmp_ok( scalar( @{ $row3[1] } ),
             '==', 2, 'old: Row 3 column 2 has 2 elements' );
+
+        @row4 = $sth->fetchrow();
+        ok( scalar @row4, 'old: Fetch fourth row' );
+        cmp_ok( ref $row4[1], 'eq', 'ARRAY',
+            'old: Row 4 column 2 is an ARRAY' );
+        cmp_ok( scalar( @{ $row4[1] } ),
+            '==', 2, 'old: Row 4 column 2 has 2 elements' );
     }
     ok( !$sth->fetchrow(), 'old: No more rows expected' );
 
@@ -230,7 +259,7 @@ qq{ INSERT INTO $list_table VALUES(81,$list_type($inner_type(null, 'listed'))) }
         'new: Row 1 column 2 object attributes'
     );
   SKIP: {
-        skip 'Subtypes new in Oracle 9' => 8 if $ora8;
+        skip 'Subtypes new in Oracle 9' => 12 if $ora8;
         @row2 = $sth->fetchrow();
         ok( scalar @row2, 'new: Fetch second row' );
         cmp_ok( ref $row2[1],
@@ -279,12 +308,37 @@ qq{ INSERT INTO $list_table VALUES(81,$list_type($inner_type(null, 'listed'))) }
                 'NUM',      5,     'NAME',   'obj3',
                 'DATETIME', undef, 'AMOUNT', '777.666'
             },
-            'new: Row 1 column 2 object attributes'
+            'new: Row 4 column 2 object attributes'
         );
+
+        @row4 = $sth->fetchrow();
+        ok( scalar @row4, 'new: Fetch fourth row' );
+        cmp_ok( ref $row4[1],
+            'eq', 'DBD::Oracle::Object',
+            'new: Row 4 column 2 is an DBD::Oracle::Object' );
+        cmp_ok(
+            uc $row4[1]->type_name,
+            'eq',
+            uc "$schema.$ts_tz_type",
+            'new: Row 4 column 2 object type'
+        );
+
+        %attrs = $row4[1]->attributes;
+
+        is_deeply(
+            \%attrs,
+            {
+		'NUM', undef, 'NAME', 'obj4',
+		# yes, this value is strange, but sqlplus returns the same
+                'TS_TZ', '2004-12-03T11:27:18 +69:00',
+                'TS_LTZ', '2004-11-30T14:27:18'
+            },
+            'new: Row 4 column 2 object attributes'
+        ) or do { note "$_: $attrs{$_}" for keys %attrs };
     }
     ok( !$sth->fetchrow(), 'new: No more rows expected' );
 
-    #print STDERR Dumper(\@row1, \@row2, \@row3);
+    #print STDERR Dumper(\@row1, \@row2, \@row3, \@row4);
 
   SKIP: {
         skip 'Subtypes new in Oracle 9' => 3 if $ora8;
